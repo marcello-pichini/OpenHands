@@ -151,11 +151,22 @@ export const CONVERSATION_QUERY_KEYS = {
   paginated: (limit: number, backendId: string, orgId: string | null) =>
     ["user", "conversations", "paginated", limit, backendId, orgId] as const,
   startTask: (id: string | null) => ["start-task", id] as const,
+  subConversationTask: (
+    taskId: string | null,
+    parentId: string | null,
+    backendId: string,
+    orgId: string | null,
+  ) => ["sub-conversation-task", taskId, parentId, backendId, orgId] as const,
   subConversations: ["v1", "sub-conversations"] as const,
 } as const;
 
 export const LOCAL_PLANNER_MUTATION_KEYS = {
   create: ["create-local-planning-conversation"] as const,
+} as const;
+
+export const CLOUD_PLANNER_MUTATION_KEYS = {
+  create: (backendId: string, orgId: string | null, parentId: string | null) =>
+    ["create-cloud-planner", backendId, orgId, parentId] as const,
 } as const;
 
 /** Cache configuration shared across all config-related queries */

@@ -1,5 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import AgentServerConversationService from "#/api/conversation-service/agent-server-conversation-service.api";
+import { useActiveBackend } from "#/contexts/active-backend-context";
+import { CONVERSATION_QUERY_KEYS } from "./query-keys";
 
 /**
  * Hook that polls V1 sub-conversation start tasks.
@@ -23,9 +25,15 @@ export const useSubConversationTaskPolling = (
   taskId: string | null,
   parentConversationId: string | null,
 ) => {
+  const { backend, orgId } = useActiveBackend();
   // Poll the task if we have both taskId and parentConversationId
   const taskQuery = useQuery({
-    queryKey: ["sub-conversation-task", taskId],
+    queryKey: CONVERSATION_QUERY_KEYS.subConversationTask(
+      taskId,
+      parentConversationId,
+      backend.id,
+      orgId,
+    ),
     queryFn: async () => {
       if (!taskId) return null;
       return AgentServerConversationService.getStartTask(taskId);

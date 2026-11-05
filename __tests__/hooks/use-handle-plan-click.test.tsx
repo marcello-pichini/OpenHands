@@ -34,6 +34,7 @@ vi.mock(
   () => ({
     default: {
       createLocalPlanningConversation: vi.fn(),
+      getStartTask: vi.fn().mockResolvedValue({ status: "WORKING" }),
     },
   }),
 );
@@ -159,13 +160,14 @@ describe("useHandlePlanClick", () => {
 
     vi.mocked(useCreateConversation).mockReturnValue(
       asMockReturnValue<ReturnType<typeof useCreateConversation>>({
-        mutate: mockCreateConversation,
+        mutateAsync: mockCreateConversation,
         isPending: false,
         isSuccess: false,
         isError: false,
         error: null,
       }),
     );
+    mockCreateConversation.mockResolvedValue({ task_id: "task-created" });
 
     vi.mocked(getConversationState).mockReturnValue({
       selectedTab: "files",
@@ -651,9 +653,10 @@ describe("useHandlePlanClick", () => {
   });
 
   describe("plan creation and persistence", () => {
-    it("creates plan conversation and persists subConversationTaskId to localStorage", () => {
+    it("creates plan conversation and persists subConversationTaskId to localStorage", async () => {
       const conversationId = "conv-123";
       const taskId = "task-789";
+      mockCreateConversation.mockResolvedValueOnce({ task_id: taskId });
 
       vi.mocked(useActiveConversation).mockReturnValue(
         asMockReturnValue<ReturnType<typeof useActiveConversation>>({
@@ -668,28 +671,15 @@ describe("useHandlePlanClick", () => {
 
       const { result } = renderPlanHook();
 
-      act(() => {
+      await act(async () => {
         result.current.handlePlanClick();
       });
 
       expect(mockSetConversationMode).toHaveBeenCalledWith("plan");
-      expect(mockCreateConversation).toHaveBeenCalledWith(
-        {
-          parentConversationId: conversationId,
-          agentType: "plan",
-          entryPoint: "plan_sub_conversation",
-        },
-        expect.objectContaining({
-          onSuccess: expect.any(Function),
-        }),
-      );
-
-      // Simulate successful conversation creation
-      const onSuccessCallback = mockCreateConversation.mock.calls[0][1]
-        .onSuccess as (data: { task_id?: string }) => void;
-
-      act(() => {
-        onSuccessCallback({ task_id: taskId });
+      expect(mockCreateConversation).toHaveBeenCalledWith({
+        parentConversationId: conversationId,
+        agentType: "plan",
+        entryPoint: "plan_sub_conversation",
       });
 
       expect(mockSetSubConversationTaskId).toHaveBeenCalledWith(taskId);
@@ -699,7 +689,7 @@ describe("useHandlePlanClick", () => {
       expect(displaySuccessToast).toHaveBeenCalled();
     });
 
-    it("passes an initial message through as the cloud planner's query", () => {
+    it("passes an initial message through as the cloud planner's query", async () => {
       const conversationId = "conv-123";
 
       vi.mocked(useActiveConversation).mockReturnValue(
@@ -715,26 +705,24 @@ describe("useHandlePlanClick", () => {
 
       const { result } = renderPlanHook();
 
-      act(() => {
+      await act(async () => {
         result.current.handlePlanClick(
           undefined,
           "Build a website about open source.",
         );
       });
 
-      expect(mockCreateConversation).toHaveBeenCalledWith(
-        {
-          parentConversationId: conversationId,
-          agentType: "plan",
-          entryPoint: "plan_sub_conversation",
-          query: "Build a website about open source.",
-        },
-        expect.objectContaining({ onSuccess: expect.any(Function) }),
-      );
+      expect(mockCreateConversation).toHaveBeenCalledWith({
+        parentConversationId: conversationId,
+        agentType: "plan",
+        entryPoint: "plan_sub_conversation",
+        query: "Build a website about open source.",
+      });
     });
 
-    it("does not persist subConversationTaskId when task_id is missing", () => {
+    it("does not persist subConversationTaskId when task_id is missing", async () => {
       const conversationId = "conv-123";
+      mockCreateConversation.mockResolvedValueOnce({});
 
       vi.mocked(useActiveConversation).mockReturnValue(
         asMockReturnValue<ReturnType<typeof useActiveConversation>>({
@@ -749,15 +737,8 @@ describe("useHandlePlanClick", () => {
 
       const { result } = renderPlanHook();
 
-      act(() => {
+      await act(async () => {
         result.current.handlePlanClick();
-      });
-
-      const onSuccessCallback = mockCreateConversation.mock.calls[0][1]
-        .onSuccess as (data: { task_id?: string }) => void;
-
-      act(() => {
-        onSuccessCallback({});
       });
 
       expect(mockSetSubConversationTaskId).not.toHaveBeenCalled();

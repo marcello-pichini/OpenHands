@@ -1,5 +1,9 @@
-import { useCallback, useEffect, type MouseEvent } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useCallback, useEffect, useRef, type MouseEvent } from "react";
+import {
+  useIsMutating,
+  useMutation,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { I18nKey } from "#/i18n/declaration";
 import { useConversationStore } from "#/stores/conversation-store";
@@ -18,9 +22,11 @@ import AgentServerConversationService from "#/api/conversation-service/agent-ser
 import { getStoredConversationMetadata } from "#/api/conversation-metadata-store";
 import {
   CONVERSATION_QUERY_KEYS,
+  CLOUD_PLANNER_MUTATION_KEYS,
   LOCAL_PLANNER_MUTATION_KEYS,
 } from "#/hooks/query/query-keys";
 import { useSubConversations } from "#/hooks/query/use-sub-conversations";
+import { useSubConversationTaskPolling } from "#/hooks/query/use-sub-conversation-task-polling";
 import { findPlannerConversationId } from "#/utils/plan-file";
 import { invalidateConversationQueries } from "#/hooks/mutation/conversation-mutation-utils";
 
@@ -93,7 +99,8 @@ function restorePlanningConversationIds(options: {
  */
 export const useHandlePlanClick = () => {
   const { t } = useTranslation("openhands");
-  const { backend } = useActiveBackend();
+  const { backend, orgId } = useActiveBackend();
+  const queryClient = useQueryClient();
   const {
     setConversationMode,
     setSubConversationTaskId,
@@ -102,8 +109,81 @@ export const useHandlePlanClick = () => {
     localPlanningConversationId,
   } = useConversationStore();
   const { data: conversation } = useActiveConversation();
-  const { mutate: createConversation, isPending: isCreatingCloudConversation } =
-    useCreateConversation();
+  const activeScopeRef = useRef({
+    backendId: backend.id,
+    orgId,
+    parentId: conversation?.id,
+  });
+  activeScopeRef.current = {
+    backendId: backend.id,
+    orgId,
+    parentId: conversation?.id,
+  };
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  const { mutateAsync: createConversation } = useCreateConversation();
+  const cloudPlannerMutationKey = CLOUD_PLANNER_MUTATION_KEYS.create(
+    backend.id,
+    orgId,
+    conversation?.id ?? null,
+  );
+  const isCreatingCloudConversation =
+    useIsMutating({
+      mutationKey: cloudPlannerMutationKey,
+      exact: true,
+    }) > 0;
+  const { mutate: createCloudPlanningConversation } = useMutation({
+    mutationKey: cloudPlannerMutationKey,
+    // The underlying create mutation owns reporting a failed request.
+    meta: { disableToast: true },
+    mutationFn: (variables: {
+      parentConversationId: string;
+      initialMessage?: string;
+      backendId: string;
+      orgId: string | null;
+    }) =>
+      createConversation({
+        parentConversationId: variables.parentConversationId,
+        agentType: "plan",
+        entryPoint: "plan_sub_conversation",
+        ...(variables.initialMessage
+          ? { query: variables.initialMessage }
+          : {}),
+      }),
+    onSuccess: (data, variables) => {
+      if (data.task_id) {
+        setConversationState(variables.parentConversationId, {
+          subConversationTaskId: data.task_id,
+        });
+        if (
+          mountedRef.current &&
+          activeScopeRef.current.parentId === variables.parentConversationId &&
+          activeScopeRef.current.backendId === variables.backendId &&
+          activeScopeRef.current.orgId === variables.orgId
+        ) {
+          setSubConversationTaskId(data.task_id);
+        }
+      }
+      displaySuccessToast(
+        t(I18nKey.PLANNING_AGENTT$PLANNING_AGENT_INITIALIZED),
+      );
+    },
+    onError: (_error, variables) => {
+      if (
+        mountedRef.current &&
+        activeScopeRef.current.parentId === variables.parentConversationId &&
+        activeScopeRef.current.backendId === variables.backendId &&
+        activeScopeRef.current.orgId === variables.orgId
+      ) {
+        setConversationMode("code");
+      }
+    },
+  });
   const {
     mutate: createLocalPlanningConversation,
     isPending: isCreatingLocalPlanningConversation,
@@ -157,12 +237,22 @@ export const useHandlePlanClick = () => {
     setLocalPlanningConversationId,
     subConversationTaskId,
     setSubConversationTaskId,
+    isCreatingCloudConversation,
   ]);
 
+  const { task: cloudPlannerTask } = useSubConversationTaskPolling(
+    backend.kind === "cloud" ? subConversationTaskId : null,
+    conversation?.id ?? null,
+  );
+  // A failed start with no conversation is retryable. Unknown/in-progress
+  // tasks and READY planners retain their ownership and must not be duplicated.
+  const hasFailedCloudPlannerTask =
+    cloudPlannerTask?.status === "ERROR" &&
+    !cloudPlannerTask.app_conversation_id;
   const hasCloudPlanner = !!(
     (conversation?.sub_conversation_ids &&
       conversation.sub_conversation_ids.length > 0) ||
-    subConversationTaskId
+    (subConversationTaskId && !hasFailedCloudPlannerTask)
   );
   // Whether a planner helper already exists for this conversation — callers
   // (e.g. the `/plan <task>` interceptor) use this to decide whether they can
@@ -201,44 +291,46 @@ export const useHandlePlanClick = () => {
         return;
       }
 
-      if (hasCloudPlanner || !conversation?.id) {
+      if (
+        hasCloudPlanner ||
+        !conversation?.id ||
+        queryClient.isMutating({
+          mutationKey: cloudPlannerMutationKey,
+          exact: true,
+        })
+      ) {
         return;
       }
 
-      createConversation(
-        {
-          parentConversationId: conversation.id,
-          agentType: "plan",
-          entryPoint: "plan_sub_conversation",
-          ...(initialMessage ? { query: initialMessage } : {}),
-        },
-        {
-          onSuccess: (data) => {
-            displaySuccessToast(
-              t(I18nKey.PLANNING_AGENTT$PLANNING_AGENT_INITIALIZED),
-            );
-            if (data.task_id) {
-              setSubConversationTaskId(data.task_id);
-              setConversationState(conversation.id, {
-                subConversationTaskId: data.task_id,
-              });
-            }
-          },
-        },
-      );
+      if (hasFailedCloudPlannerTask) {
+        // Clear persistence first: the restoration effect must not bring the
+        // failed task back while the explicit replacement request is pending.
+        setConversationState(conversation.id, { subConversationTaskId: null });
+        setSubConversationTaskId(null);
+      }
+      createCloudPlanningConversation({
+        parentConversationId: conversation.id,
+        initialMessage,
+        backendId: backend.id,
+        orgId,
+      });
     },
     [
       backend.kind,
+      backend.id,
+      orgId,
       conversation,
-      createConversation,
+      createCloudPlanningConversation,
       createLocalPlanningConversation,
       hasCloudPlanner,
+      hasFailedCloudPlannerTask,
+      cloudPlannerMutationKey,
+      queryClient,
       isCreatingLocalPlanningConversation,
       localPlanningConversationId,
       serverPlanningConversationId,
       setConversationMode,
       setSubConversationTaskId,
-      t,
     ],
   );
 

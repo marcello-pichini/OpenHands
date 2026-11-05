@@ -6,12 +6,22 @@ import AgentServerConversationService from "#/api/conversation-service/agent-ser
 import { useSubConversationTaskPolling } from "#/hooks/query/use-sub-conversation-task-polling";
 import type { AppConversationStartTask } from "#/api/conversation-service/agent-server-conversation-service.types";
 
-// Mock the underlying service
-vi.mock("#/api/conversation-service/agent-server-conversation-service.api", () => ({
-  default: {
-    getStartTask: vi.fn(),
-  },
+const { activeScope } = vi.hoisted(() => ({
+  activeScope: { backend: { id: "local" }, orgId: null as string | null },
 }));
+vi.mock("#/contexts/active-backend-context", () => ({
+  useActiveBackend: () => activeScope,
+}));
+
+// Mock the underlying service
+vi.mock(
+  "#/api/conversation-service/agent-server-conversation-service.api",
+  () => ({
+    default: {
+      getStartTask: vi.fn(),
+    },
+  }),
+);
 
 describe("useSubConversationTaskPolling", () => {
   let queryClient: QueryClient;
@@ -51,6 +61,8 @@ describe("useSubConversationTaskPolling", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    activeScope.backend.id = "local";
+    activeScope.orgId = null;
   });
 
   afterEach(() => {
@@ -60,7 +72,9 @@ describe("useSubConversationTaskPolling", () => {
   it("should return task status when task is READY", async () => {
     // Arrange
     const mockTask = createMockTask("READY", "sub-conversation-123");
-    vi.mocked(AgentServerConversationService.getStartTask).mockResolvedValue(mockTask);
+    vi.mocked(AgentServerConversationService.getStartTask).mockResolvedValue(
+      mockTask,
+    );
 
     // Act
     const { result } = renderHook(
@@ -74,12 +88,16 @@ describe("useSubConversationTaskPolling", () => {
       expect(result.current.taskStatus).toBe("READY");
     });
     expect(result.current.subConversationId).toBe("sub-conversation-123");
-    expect(AgentServerConversationService.getStartTask).toHaveBeenCalledWith("task-123");
+    expect(AgentServerConversationService.getStartTask).toHaveBeenCalledWith(
+      "task-123",
+    );
   });
 
   it("should not poll when taskId is null", async () => {
     // Arrange
-    vi.mocked(AgentServerConversationService.getStartTask).mockResolvedValue(null);
+    vi.mocked(AgentServerConversationService.getStartTask).mockResolvedValue(
+      null,
+    );
 
     // Act
     const { result } = renderHook(
@@ -97,7 +115,9 @@ describe("useSubConversationTaskPolling", () => {
 
   it("should not poll when parentConversationId is null", async () => {
     // Arrange
-    vi.mocked(AgentServerConversationService.getStartTask).mockResolvedValue(null);
+    vi.mocked(AgentServerConversationService.getStartTask).mockResolvedValue(
+      null,
+    );
 
     // Act
     const { result } = renderHook(
@@ -112,4 +132,32 @@ describe("useSubConversationTaskPolling", () => {
     expect(AgentServerConversationService.getStartTask).not.toHaveBeenCalled();
     expect(result.current.taskStatus).toBeUndefined();
   });
+
+  it.each(["backend", "organization", "parent"])(
+    "does not reuse a failed task from another %s scope",
+    async (scope) => {
+      const failedTask = createMockTask("ERROR");
+      const readyTask = createMockTask("READY", "planner");
+      vi.mocked(AgentServerConversationService.getStartTask)
+        .mockResolvedValueOnce(failedTask)
+        .mockResolvedValueOnce(readyTask);
+      const { result, rerender } = renderHook(
+        ({ parent }) => useSubConversationTaskPolling("task-123", parent),
+        { wrapper: createWrapper(), initialProps: { parent: "parent-1" } },
+      );
+      await waitFor(() => expect(result.current.taskStatus).toBe("ERROR"));
+
+      if (scope === "backend") activeScope.backend.id = "other-backend";
+      if (scope === "organization") activeScope.orgId = "other-org";
+      rerender({ parent: scope === "parent" ? "parent-2" : "parent-1" });
+
+      // A previous scope's terminal error must not authorize replacement of
+      // a task which is READY in the newly selected scope.
+      await waitFor(() => expect(result.current.taskStatus).toBe("READY"));
+      expect(result.current.subConversationId).toBe("planner");
+      expect(AgentServerConversationService.getStartTask).toHaveBeenCalledTimes(
+        2,
+      );
+    },
+  );
 });
